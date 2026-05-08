@@ -757,7 +757,7 @@ function loadOrdersFile(file){
     uploadedHeaders=json[0].map(String);
     ordersRaw=json.slice(1);
     autoMapCols();
-    // שמירת הנתונים הגולמיים ב-localStorage (JSON בלבד, לא base64)
+    // שמירת הנתונים הגולמיים ב-localStorage — תמיד מעדכן לקובץ החדש
     try {
       secureSet(ORDERS_CACHE_KEY, {
         name: file.name,
@@ -766,6 +766,12 @@ function loadOrdersFile(file){
         ts: new Date().toLocaleString('he-IL')
       });
     } catch(e){ console.warn('Cache save failed:', e); }
+    // אם האפליקציה כבר פתוחה — בנה מחדש אוטומטית (מסיר הזמנות שנסגרו)
+    if(document.getElementById('app').style.display !== 'none'){
+      loadApp();
+      showToast('✅ דוח חדש נטען — הזמנות עודכנו');
+      return;
+    }
     document.getElementById('orders-loaded').style.display='flex';
     document.getElementById('orders-name').textContent=file.name;
     document.getElementById('continueBtn').disabled=false;
@@ -2294,16 +2300,22 @@ async function saveVersion(name){
 }
 
 function loadVersion(id){
-  // support both cloud (rendered in list) and local
   _cloudVersionsCache = _cloudVersionsCache||[];
   const cv = _cloudVersionsCache.find(v=>v.id==id);
   const lv = getVersions().find(v=>v.id==id);
   const v = cv||lv;
   if(!v){ showToast('❌ גרסה לא נמצאה'); return; }
-  pendingMergeState = v.state;
-  applyState(v.state);
   document.getElementById('saveModal').style.display='none';
-  showToast('✅ גרסה נטענה: '+v.name+' · טען דוח חדש למיזוג אוטומטי');
+  pendingMergeState = v.state;
+  if(ordersRaw.length){
+    // יש קובץ טעון — בנה מחדש ומזג (מסיר הזמנות שנסגרו)
+    loadApp();
+    showToast('✅ גרסה נטענה ומוזגת: '+v.name);
+  } else {
+    // אין קובץ — רק שחזר state (ייתכן שיש הזמנות ישנות)
+    applyState(v.state);
+    showToast('✅ גרסה נטענה: '+v.name+' · טען דוח חדש למיזוג');
+  }
 }
 
 async function deleteVersion(id){
@@ -2458,9 +2470,8 @@ function saveVersion(name){
 function autoSave(){
   if(!ORDERS.length) return;
   secureSet(AUTOSAVE_KEY, { ts: new Date().toLocaleString('he-IL'), state: captureState() });
-  cloudSave(); // גם לענן
   const el=document.getElementById('autoSaveStatus');
-  if(el) el.textContent='שמירה אוטומטית: '+new Date().toLocaleTimeString('he-IL');
+  if(el) el.textContent='נשמר מקומית: '+new Date().toLocaleTimeString('he-IL');
 }
 
 function loadVersion(id){
@@ -2522,10 +2533,15 @@ function loadAutoSave(){
   try{
     const auto = secureGet(AUTOSAVE_KEY);
     if(!auto) return;
-    pendingMergeState = auto.state;
-    applyState(auto.state);
     document.getElementById('saveModal').style.display='none';
-    showToast('✅ שמירה אוטומטית טעינה · טען דוח חדש למיזוג אוטומטי');
+    pendingMergeState = auto.state;
+    if(ordersRaw.length){
+      loadApp();
+      showToast('✅ שמירה אוטומטית נטענה ומוזגת');
+    } else {
+      applyState(auto.state);
+      showToast('✅ שמירה אוטומטית נטענה · טען דוח חדש למיזוג');
+    }
   }catch(e){ showToast('❌ שגיאה בטעינת שמירה אוטומטית'); }
 }
 
@@ -2542,8 +2558,11 @@ function openSaveModal(){
 // Auto-save every 2 minutes
 let _autoSaveInterval = null;
 function quickSave(){
-  autoSave();
-  cloudSave(true);
+  if(!ORDERS.length){ showToast('⚠️ אין נתונים לשמירה'); return; }
+  const btn = document.getElementById('quickSaveBtn');
+  if(btn){ btn.textContent='⏳...'; btn.disabled=true; }
+  secureSet(AUTOSAVE_KEY, { ts: new Date().toLocaleString('he-IL'), state: captureState() });
+  cloudSave(true).finally(()=>{ if(btn) btn.disabled=false; });
 }
 
 // ═══ SUPABASE CLOUD SYNC ═══
@@ -2604,12 +2623,8 @@ function startCloudPoll(){
     if(!row) return;
     if(_lastCloudTs && row.updated_at !== _lastCloudTs){
       _lastCloudTs = row.updated_at;
-      // Only apply if we didn't just save ourselves
-      if(Date.now() - _lastCloudSave > 5000){
-        applyState(row.state);
-        render(); buildSidebar(); renderPipeline(); updateFc();
-        showToast('🔄 עודכן מהענן');
-      }
+      // רק מודיע — לא דורס את העבודה הנוכחית
+      showToast('🔔 מישהו שמר לענן — לחץ Save לסנכרון');
     } else if(!_lastCloudTs){
       _lastCloudTs = row.updated_at;
     }
