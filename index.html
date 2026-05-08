@@ -2241,6 +2241,144 @@ function getVersions(){
   catch(e){ return []; }
 }
 
+async function getVersionsCloud(){
+  try{
+    const res = await fetch(SB_URL+'/rest/v1/forecast_versions?order=created_at.desc&limit=20',{
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
+    });
+    if(!res.ok) return [];
+    return await res.json();
+  }catch(e){ return []; }
+}
+
+async function saveVersionCloud(vname){
+  const v = { id: Date.now(), name: vname, ts: new Date().toLocaleString('he-IL'), state: captureState() };
+  try{
+    const res = await fetch(SB_URL+'/rest/v1/forecast_versions',{
+      method:'POST',
+      headers:{...SB_HEADERS,'Prefer':'resolution=merge-duplicates,return=minimal'},
+      body: JSON.stringify(v)
+    });
+    if(!res.ok) throw new Error(await res.text());
+    return true;
+  }catch(e){ console.error('saveVersionCloud error:',e); return false; }
+}
+
+async function deleteVersionCloud(id){
+  try{
+    const res = await fetch(SB_URL+'/rest/v1/forecast_versions?id=eq.'+id,{
+      method:'DELETE',
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
+    });
+    return res.ok;
+  }catch(e){ return false; }
+}
+
+async function saveVersion(name){
+  const inp = document.getElementById('saveNameInp');
+  const vname = (name||inp?.value||'').trim() || `גרסה ${new Date().toLocaleString('he-IL')}`;
+  const ok = await saveVersionCloud(vname);
+  if(inp) inp.value='';
+  if(ok){
+    showToast('✅ נשמר בענן: '+vname);
+    await renderVersionsList();
+  } else {
+    // fallback to local
+    const versions = getVersions();
+    versions.unshift({ id: Date.now(), name: vname, ts: new Date().toLocaleString('he-IL'), state: captureState() });
+    if(versions.length > 20) versions.splice(20);
+    secureSet(SAVE_KEY, versions);
+    showToast('✅ נשמר מקומית: '+vname);
+    await renderVersionsList();
+  }
+}
+
+function loadVersion(id){
+  // support both cloud (rendered in list) and local
+  _cloudVersionsCache = _cloudVersionsCache||[];
+  const cv = _cloudVersionsCache.find(v=>v.id==id);
+  const lv = getVersions().find(v=>v.id==id);
+  const v = cv||lv;
+  if(!v){ showToast('❌ גרסה לא נמצאה'); return; }
+  pendingMergeState = v.state;
+  applyState(v.state);
+  document.getElementById('saveModal').style.display='none';
+  showToast('✅ גרסה נטענה: '+v.name+' · טען דוח חדש למיזוג אוטומטי');
+}
+
+async function deleteVersion(id){
+  if(!confirm('למחוק גרסה זו?')) return;
+  const cloudOk = await deleteVersionCloud(id);
+  if(!cloudOk){
+    // fallback local
+    const versions = getVersions().filter(v=>v.id!==id);
+    secureSet(SAVE_KEY, versions);
+  }
+  await renderVersionsList();
+  showToast('🗑 גרסה נמחקה');
+}
+
+let _cloudVersionsCache = [];
+
+async function renderVersionsList(){
+  const el = document.getElementById('versionsList');
+  if(!el) return;
+
+  // Auto-save entry (local)
+  let autoHtml = '';
+  try{
+    const auto = secureGet(AUTOSAVE_KEY);
+    if(auto){
+      const mkdOrds = (auto.state?.ordersMarked||[]).filter(o=>o.marked).length;
+      const mkdPip  = Object.values(auto.state?.pipByAgent||{}).reduce((s,d)=>s+(d.items||[]).filter(p=>p.marked).length,0);
+      autoHtml = `<div style="background:var(--accent-dim);border:1.5px dashed var(--accent);border-radius:var(--radius);padding:10px 14px;display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+        <span style="font-size:18px;">🔄</span>
+        <div style="flex:1;">
+          <div style="font-size:12px;font-weight:700;color:var(--accent);">שמירה אוטומטית (מקומית)</div>
+          <div style="font-size:11px;color:var(--text2);">${auto.ts} · ${mkdOrds} הזמנות + ${mkdPip} Pipeline מסומנים</div>
+        </div>
+        <button class="btn btn-ghost" style="font-size:11px;padding:4px 10px;" onclick="loadAutoSave()">טען</button>
+      </div>`;
+    }
+  }catch(e){}
+
+  el.innerHTML = autoHtml + '<div style="text-align:center;padding:16px;color:var(--text3);font-size:12px;">⏳ טוען גרסאות מהענן...</div>';
+
+  // Load from cloud
+  const cloudVersions = await getVersionsCloud();
+  _cloudVersionsCache = cloudVersions;
+
+  // Also merge local versions
+  const localVersions = getVersions();
+  const allIds = new Set(cloudVersions.map(v=>String(v.id)));
+  const localOnly = localVersions.filter(v=>!allIds.has(String(v.id)));
+  const allVersions = [...cloudVersions, ...localOnly];
+
+  if(!allVersions.length && !autoHtml){
+    el.innerHTML = autoHtml + '<div style="text-align:center;padding:24px;color:var(--text3);font-size:12px;">אין גרסאות שמורות עדיין</div>';
+    return;
+  }
+
+  el.innerHTML = autoHtml + allVersions.map(v=>{
+    const mkdOrds = (v.state?.ordersMarked||[]).filter(o=>o.marked).length;
+    const mkdPip  = Object.values(v.state?.pipByAgent||{}).reduce((s,d)=>s+(d.items||[]).filter(p=>p.marked).length,0);
+    const isCloud = allIds.has(String(v.id));
+    return `<div style="background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);padding:10px 14px;display:flex;align-items:center;gap:10px;">
+      <span style="font-size:20px;">${isCloud?'☁️':'📌'}</span>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${v.name}</div>
+        <div style="font-size:11px;color:var(--text2);margin-top:2px;">${v.ts} ${isCloud?'· ענן':'· מקומי'}</div>
+        <div style="font-size:10px;color:var(--text3);margin-top:2px;">${mkdOrds} הזמנות מסומנות · ${mkdPip} Pipeline</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0;">
+        <button class="btn btn-ghost" style="font-size:11px;padding:4px 10px;" onclick="loadVersion(${v.id})">📂 טען</button>
+        <button class="btn btn-ghost" style="font-size:11px;padding:4px 10px;" onclick="exportVersion(${v.id})">⬇️ ייצא</button>
+        <button class="btn btn-ghost" style="font-size:11px;padding:4px 10px;color:var(--red,#e53e3e);border-color:var(--red,#e53e3e);" onclick="deleteVersion(${v.id})">🗑</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 function captureState(){
   return {
     // Orders state
@@ -2344,8 +2482,7 @@ function deleteVersion(id){
 }
 
 function exportVersion(id){
-  const versions = getVersions();
-  const v = versions.find(v=>v.id===id);
+  const v = (_cloudVersionsCache||[]).find(v=>v.id==id) || getVersions().find(v=>v.id==id);
   if(!v) return;
   const blob = new Blob([JSON.stringify({name:v.name, ts:v.ts, state:v.state}, null, 2)], {type:'application/json'});
   const a = document.createElement('a');
@@ -2379,55 +2516,7 @@ function importVersionFile(){
   inp.click();
 }
 
-function renderVersionsList(){
-  const el = document.getElementById('versionsList');
-  if(!el) return;
-  const versions = getVersions();
 
-  // Auto-save entry
-  let autoHtml = '';
-  try{
-    const auto = secureGet(AUTOSAVE_KEY);
-    if(auto){
-      const mkdOrds = (auto.state?.ordersMarked||[]).filter(o=>o.marked).length;
-      const mkdPip  = Object.values(auto.state?.pipByAgent||{}).reduce((s,d)=>s+(d.items||[]).filter(p=>p.marked).length,0);
-      autoHtml = `<div style="background:var(--accent-dim);border:1.5px dashed var(--accent);border-radius:var(--radius);padding:10px 14px;display:flex;align-items:center;gap:10px;margin-bottom:6px;">
-        <span style="font-size:18px;">🔄</span>
-        <div style="flex:1;">
-          <div style="font-size:12px;font-weight:700;color:var(--accent);">שמירה אוטומטית</div>
-          <div style="font-size:11px;color:var(--text2);">${auto.ts} · ${mkdOrds} הזמנות + ${mkdPip} Pipeline מסומנים</div>
-        </div>
-        <button class="btn btn-ghost" style="font-size:11px;padding:4px 10px;" onclick="loadAutoSave()">טען</button>
-      </div>`;
-    }
-  }catch(e){}
-
-  if(!versions.length && !autoHtml){
-    el.innerHTML='<div style="text-align:center;padding:24px;color:var(--text3);font-size:12px;">אין גרסאות שמורות עדיין</div>';
-    return;
-  }
-
-  el.innerHTML = autoHtml + versions.map(v=>{
-    const mkdOrds = (v.state?.ordersMarked||[]).filter(o=>o.marked).length;
-    const mkdPip  = Object.values(v.state?.pipByAgent||{}).reduce((s,d)=>s+(d.items||[]).filter(p=>p.marked).length,0);
-    const pipAgents = Object.keys(v.state?.pipByAgent||{}).join(', ') || '—';
-    return `<div style="background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);padding:10px 14px;display:flex;align-items:center;gap:10px;">
-      <span style="font-size:20px;">📌</span>
-      <div style="flex:1;min-width:0;">
-        <div style="font-size:13px;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${v.name}</div>
-        <div style="font-size:11px;color:var(--text2);margin-top:2px;">${v.ts}</div>
-        <div style="font-size:10px;color:var(--text3);margin-top:2px;">
-          ${mkdOrds} הזמנות מסומנות · ${mkdPip} Pipeline · סוכנים: ${pipAgents}
-        </div>
-      </div>
-      <div style="display:flex;gap:6px;flex-shrink:0;">
-        <button class="btn btn-ghost" style="font-size:11px;padding:4px 10px;" onclick="loadVersion(${v.id})">📂 טען</button>
-        <button class="btn btn-ghost" style="font-size:11px;padding:4px 10px;" onclick="exportVersion(${v.id})">⬇️ ייצא</button>
-        <button class="btn btn-ghost" style="font-size:11px;padding:4px 10px;color:var(--red,#e53e3e);border-color:var(--red,#e53e3e);" onclick="deleteVersion(${v.id})">🗑</button>
-      </div>
-    </div>`;
-  }).join('');
-}
 
 function loadAutoSave(){
   try{
@@ -2441,14 +2530,13 @@ function loadAutoSave(){
 }
 
 function openSaveModal(){
-  renderVersionsList();
-  // Update autosave status
+  document.getElementById('saveModal').style.display='flex';
   try{
     const auto = secureGet(AUTOSAVE_KEY);
     const el = document.getElementById('autoSaveStatus');
     if(el && auto) el.textContent = 'שמירה אוטומטית אחרונה: '+auto.ts;
   }catch(e){}
-  document.getElementById('saveModal').style.display='flex';
+  renderVersionsList();
 }
 
 // Auto-save every 2 minutes
